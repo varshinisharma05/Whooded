@@ -7,7 +7,7 @@ class SocketService {
     this.connectionPromise = null;
   }
 
-  connect(serverUrl = 'http://localhost:3001') {
+  connect(serverUrl = import.meta.env.VITE_API_URL) {
     console.log('Attempting to connect to:', serverUrl);
     
     if (this.socket && this.isConnected) {
