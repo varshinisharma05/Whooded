@@ -67,140 +67,136 @@ function App() {
 
   // Only connect when user actually tries to create or join a room
   const connectToServer = async () => {
-    if (!isConnected) {
-      const backendUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001';
-      try {
-        await socketService.connect(backendUrl);
-        return true;
-      } catch (error) {
-        console.error('Failed to connect:', error);
-        return false;
-      }
+  if (!isConnected) {
+    const backendUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001';
+    try {
+      await socketService.connect(backendUrl);
+
+      // ✅ Add your socket listeners here
+      socketService.on('connect', () => {
+        setIsConnected(true);
+      });
+
+      socketService.on('disconnect', () => {
+        setIsConnected(false);
+      });
+
+      socketService.on('room_created', (data) => {
+        console.log('🎉 Room created event received:', data);
+        setRoomCode(data.roomCode);
+        setPlayers(data.players);
+        setGameState('lobby');
+        setCurrentPlayer(data.players.find(p => p.isHost));
+        setIsCreating(false);
+        console.log('✅ Room creation completed successfully');
+      });
+
+      socketService.on('room_joined', (data) => {
+        console.log('🎉 Room joined event received:', data);
+        setRoomCode(data.roomCode);
+        setPlayers(data.players);
+        setGameState('lobby');
+        setCurrentPlayer(data.players.find(p => p.nickname === nickname));
+        setIsJoining(false);
+        console.log('✅ Room joining completed successfully');
+      });
+
+      socketService.on('join_error', (data) => {
+        console.log('❌ Join error received:', data);
+        alert(data.message);
+        setIsJoining(false);
+        setIsCreating(false);
+      });
+
+      socketService.on('player_joined', (data) => {
+        setPlayers(data.players);
+      });
+
+      socketService.on('player_left', (data) => {
+        setPlayers(data.players);
+      });
+
+      socketService.on('role_assigned', (data) => {
+        setRole(data.role);
+        setPhase(data.phase);
+        setGameState('game');
+      });
+
+      socketService.on('game_started', (data) => {
+        setPhase(data.phase);
+        setPlayers(data.players);
+        setGameState('game');
+      });
+
+      socketService.on('investigation_result', (data) => {
+        setInvestigationResult(data);
+      });
+
+      socketService.on('day_phase_start', (data) => {
+        setPhase(PHASES.DAY);
+        setNightResult(data.nightResult);
+        setPlayers(data.players);
+        setSelectedTarget(null);
+        setInvestigationResult(null);
+      });
+
+      socketService.on('chat_message', (data) => {
+        setChatMessages(prev => [...prev, data]);
+      });
+
+      socketService.on('player_accused', (data) => {
+        setAccusedPlayer(data);
+      });
+
+      socketService.on('voting_phase_start', (data) => {
+        setPhase(PHASES.VOTING);
+        if (data.accusedPlayer) {
+          setAccusedPlayer(data.accusedPlayer);
+        }
+      });
+
+      socketService.on('voting_result', (data) => {
+        if (data.eliminated) {
+          alert(`${data.eliminated.nickname} was eliminated! Role: ${data.eliminated.role}`);
+        } else {
+          alert(`No one was eliminated. Votes: ${data.guiltyVotes} Guilty, ${data.innocentVotes} Innocent`);
+        }
+        setVotingTarget(null);
+        setAccusedPlayer(null);
+        setHasAccused(false);
+        setPhaseNumber(prev => prev + 1);
+      });
+
+      socketService.on('night_phase_start', (data) => {
+        setPhase(PHASES.NIGHT);
+        setPlayers(data.players);
+      });
+
+      socketService.on('accusation_error', (data) => {
+        alert(data.message);
+      });
+
+      socketService.on("timer_update", (data) => {
+        setPhaseTimer(data.timeRemaining);
+        setCurrentPhase(data.phase);
+      });
+
+      socketService.on('game_over', (data) => {
+        setPhase(PHASES.GAME_OVER);
+        setGameResult(data.result);
+        setPlayers(data.players);
+      });
+
+      return true;
+    } catch (error) {
+      console.error('❌ Failed to connect to server:', error);
+      return false;
     }
-    return true;
-  };
+  }
+  return true;
+};
 
-  useEffect(() => {
-    // Socket event listeners (only set up once)
-    socketService.on('connect', () => {
-      setIsConnected(true);
-    });
-
-    socketService.on('disconnect', () => {
-      setIsConnected(false);
-    });
-
-    socketService.on('room_created', (data) => {
-      console.log('🎉 Room created event received:', data);
-      setRoomCode(data.roomCode);
-      setPlayers(data.players);
-      setGameState('lobby');
-      setCurrentPlayer(data.players.find(p => p.isHost));
-      setIsCreating(false);
-      console.log('✅ Room creation completed successfully');
-    });
-
-    socketService.on('room_joined', (data) => {
-      console.log('🎉 Room joined event received:', data);
-      setRoomCode(data.roomCode);
-      setPlayers(data.players);
-      setGameState('lobby');
-      setCurrentPlayer(data.players.find(p => p.nickname === nickname));
-      setIsJoining(false);
-      console.log('✅ Room joining completed successfully');
-    });
-
-    socketService.on('join_error', (data) => {
-      console.log('❌ Join error received:', data);
-      alert(data.message);
-      setIsJoining(false);
-      setIsCreating(false);
-    });
-
-    socketService.on('player_joined', (data) => {
-      setPlayers(data.players);
-    });
-
-    socketService.on('player_left', (data) => {
-      setPlayers(data.players);
-    });
-
-    socketService.on('role_assigned', (data) => {
-      setRole(data.role);
-      setPhase(data.phase);
-      setGameState('game');
-    });
-
-    socketService.on('game_started', (data) => {
-      setPhase(data.phase);
-      setPlayers(data.players);
-      setGameState('game');
-    });
-
-    socketService.on('investigation_result', (data) => {
-      setInvestigationResult(data);
-    });
-
-    socketService.on('day_phase_start', (data) => {
-      setPhase(PHASES.DAY);
-      setNightResult(data.nightResult);
-      setPlayers(data.players);
-      setSelectedTarget(null);
-      setInvestigationResult(null);
-    });
-
-    socketService.on('chat_message', (data) => {
-      setChatMessages(prev => [...prev, data]);
-    });
-
-    socketService.on('player_accused', (data) => {
-      setAccusedPlayer(data);
-    });
-
-    socketService.on('voting_phase_start', (data) => {
-      setPhase(PHASES.VOTING);
-      if (data.accusedPlayer) {
-        setAccusedPlayer(data.accusedPlayer);
-      }
-    });
-
-    socketService.on('voting_result', (data) => {
-      if (data.eliminated) {
-        alert(`${data.eliminated.nickname} was eliminated! Role: ${data.eliminated.role}`);
-      } else {
-        alert(`No one was eliminated. Votes: ${data.guiltyVotes} Guilty, ${data.innocentVotes} Innocent`);
-      }
-      setVotingTarget(null);
-      setAccusedPlayer(null);
-      setHasAccused(false); // Reset for next day
-      setPhaseNumber(prev => prev + 1);
-    });
-
-    socketService.on('night_phase_start', (data) => {
-      setPhase(PHASES.NIGHT);
-      setPlayers(data.players);
-    });
-
-    socketService.on('accusation_error', (data) => {
-      alert(data.message);
-    });
-
-    socketService.on("timer_update", (data) => {
-      setPhaseTimer(data.timeRemaining);
-      setCurrentPhase(data.phase);
-    });
-
-    socketService.on('game_over', (data) => {
-      setPhase(PHASES.GAME_OVER);
-      setGameResult(data.result);
-      setPlayers(data.players);
-    });
-
-    return () => {
-      socketService.disconnect();
-    };
-  }, []);
-
+ 
    const createRoom = async () => {
     if (!nickname.trim()) {
       alert("Please enter a nickname");
@@ -259,6 +255,7 @@ function App() {
   const startGame = () => {
     setShowIntro(true);
     setIntroStep(0);
+    socketService.emit('start_game');
   };
 
   const performNightAction = (action, target) => {
@@ -334,6 +331,39 @@ function App() {
   const canVote = () => {
     return phase === PHASES.VOTING && getAlivePlayers().find(p => p.nickname === nickname)?.isAlive;
   };
+
+  const introStory = [
+    "In a peaceful village, everyone lived in harmony…",
+    "Until one night, mysterious crimes began.",
+    "The Mafia hides among them…",
+    "The Doctor tries to save lives…",
+    "The Police hunts in secret…",
+    "And the villagers must vote to survive."
+  ];
+
+  const skipIntro = () => {
+    setShowIntro(false);
+    socketService.emit('start_game');
+  };
+
+
+   useEffect(() => {
+  let timer;
+
+  if (showIntro && introStep < introStory.length) {
+    timer = setTimeout(() => {
+      setIntroStep(prev => prev + 1);
+    }, 3000);
+  } else if (showIntro && introStep >= introStory.length) {
+    timer = setTimeout(() => {
+      setShowIntro(false);
+      socketService.emit('start_game');
+    }, 2000);
+  }
+
+  return () => clearTimeout(timer);
+}, [showIntro, introStep]);
+
 
   if (gameState === 'menu') {
     return (
@@ -467,7 +497,7 @@ function App() {
   }
 
   // Intro Story Component
-  const introStory = [
+  /*const introStory = [
     "In a peaceful village, everyone lived in harmony…",
     "Until one night, mysterious crimes began.",
     "The Mafia hides among them…",
@@ -479,21 +509,24 @@ function App() {
   const skipIntro = () => {
     setShowIntro(false);
     socketService.emit('start_game');
-  };
+  };*/
 
-  useEffect(() => {
-    if (showIntro && introStep < introStory.length) {
-      const timer = setTimeout(() => {
-        setIntroStep(prev => prev + 1);
-      }, 3000);
-      return () => clearTimeout(timer);
-    } else if (showIntro && introStep >= introStory.length) {
-      setTimeout(() => {
-        setShowIntro(false);
-        socketService.emit('start_game');
-      }, 2000);
-    }
-  }, [showIntro, introStep]);
+  /*useEffect(() => {
+  let timer;
+
+  if (showIntro && introStep < introStory.length) {
+    timer = setTimeout(() => {
+      setIntroStep(prev => prev + 1);
+    }, 3000);
+  } else if (showIntro && introStep >= introStory.length) {
+    timer = setTimeout(() => {
+      setShowIntro(false);
+      socketService.emit('start_game');
+    }, 2000);
+  }
+
+  return () => clearTimeout(timer);
+}, [showIntro, introStep]); */
 
   if (showIntro) {
     return (
