@@ -1,3 +1,5 @@
+// frontend/src/lib/socketService.js
+
 import { io } from 'socket.io-client';
 
 class SocketService {
@@ -5,66 +7,90 @@ class SocketService {
     this.socket = null;
     this.isConnected = false;
     this.connectionPromise = null;
+    this.pendingListeners = new Map();
   }
 
-  connect(serverUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001')
- {
-    console.log('Attempting to connect to:', serverUrl);
-    
-    if (this.socket && this.isConnected) {
-      console.log('Already connected, returning existing socket');
-      return Promise.resolve(this.socket);
+  _chooseServerUrl(explicitServerUrl) {
+    const defaultLocal = 'http://localhost:3001';
+    const envUrl =
+      typeof import.meta !== 'undefined' &&
+      import.meta.env &&
+      import.meta.env.VITE_BACKEND_URL
+        ? import.meta.env.VITE_BACKEND_URL
+        : null;
+
+    const isLocalHostname =
+    typeof window !== 'undefined' &&
+    (window.location.hostname === 'localhost' ||
+      window.location.hostname === '127.0.0.1');
+
+    const isDevMode =
+    (typeof import.meta !== 'undefined' &&
+     import.meta.env &&
+     import.meta.env.MODE === 'development') ||
+     isLocalHostname;
+
+    if (explicitServerUrl) return explicitServerUrl;
+    if (isDevMode || isLocalHostname) return defaultLocal;
+    if (envUrl) return envUrl;
+    if (typeof window !== 'undefined') return window.location.origin;
+    return defaultLocal;
+  }
+
+  async connect(explicitServerUrl) {
+    if (this.socket && this.socket.connected) {
+      this.isConnected = true;
+      return this.socket;
     }
 
     if (this.connectionPromise) {
-      console.log('Connection already in progress, returning existing promise');
       return this.connectionPromise;
     }
 
+    const serverUrl = this._chooseServerUrl(explicitServerUrl);
+    console.log('[SocketService] Connecting to:', serverUrl);
+
     this.connectionPromise = new Promise((resolve, reject) => {
-      if (this.socket) {
-        console.log('Disconnecting existing socket');
-        this.socket.disconnect();
-      }
+      try {
+        this.socket = io(serverUrl, {
+          transports: ['websocket', 'polling'],
+          timeout: 20000,
+          reconnection: true,
+          reconnectionAttempts: 5,
+          reconnectionDelay: 1000,
+          withCredentials: false
+        });
 
-      console.log('Creating new socket connection');
-      this.socket = io(serverUrl, {
-        transports: ['websocket', 'polling'],
-        timeout: 20000,
-        forceNew: true,
-        reconnection: true,
-        reconnectionAttempts: 3,
-        reconnectionDelay: 1000
-      });
+        // Re-attach all buffered listeners
+        this.pendingListeners.forEach((cb, event) => {
+          this.socket.on(event, cb);
+        });
+        this.pendingListeners.clear();
 
-      this.socket.on('connect', () => {
-        console.log('✅ Connected to server successfully');
-        this.isConnected = true;
-        this.connectionPromise = null;
-        resolve(this.socket);
-      });
-
-      this.socket.on('disconnect', (reason) => {
-        console.log('❌ Disconnected from server:', reason);
-        this.isConnected = false;
-        this.connectionPromise = null;
-      });
-
-      this.socket.on('connect_error', (error) => {
-        console.error('❌ Connection error:', error);
-        this.isConnected = false;
-        this.connectionPromise = null;
-        reject(error);
-      });
-
-      // Timeout after 15 seconds
-      setTimeout(() => {
-        if (!this.isConnected) {
-          console.error('❌ Connection timeout after 15 seconds');
+        this.socket.on('connect', () => {
+          console.log('[SocketService] Connected:', this.socket.id);
+          this.isConnected = true;
           this.connectionPromise = null;
-          reject(new Error('Connection timeout'));
-        }
-      }, 15000);
+          resolve(this.socket);
+        });
+
+        this.socket.on('disconnect', (reason) => {
+          console.warn('[SocketService] Disconnected:', reason);
+          this.isConnected = false;
+        });
+
+        this.socket.on('connect_error', (err) => {
+          console.error('[SocketService] connect_error:', err.message);
+          if (this.socket.io.engine.reconnectionAttempts >= 5) {
+            reject(err);
+          }
+        });
+
+      } catch (err) {
+        console.error('[SocketService] Failed to start connection:', err);
+        this.connectionPromise = null;
+        reject(err);
+      }
     });
 
     return this.connectionPromise;
@@ -74,30 +100,32 @@ class SocketService {
     if (this.socket) {
       this.socket.disconnect();
       this.socket = null;
-      this.isConnected = false;
-      this.connectionPromise = null;
     }
+    this.isConnected = false;
   }
 
   emit(event, data) {
-    if (this.socket && this.isConnected) {
+    if (this.socket && this.socket.connected) {
       this.socket.emit(event, data);
       return true;
-    } else {
-      console.warn('Socket not connected, cannot emit:', event);
-      return false;
     }
+    console.warn(`[SocketService] emit failed (not connected): ${event}`);
+    return false;
   }
 
   on(event, callback) {
     if (this.socket) {
       this.socket.on(event, callback);
+    } else {
+      this.pendingListeners.set(event, callback);
     }
   }
 
   off(event, callback) {
     if (this.socket) {
       this.socket.off(event, callback);
+    } else {
+      this.pendingListeners.delete(event);
     }
   }
 
@@ -107,4 +135,3 @@ class SocketService {
 }
 
 export default new SocketService();
-

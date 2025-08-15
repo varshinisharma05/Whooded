@@ -6,23 +6,26 @@ const cors = require('cors');
 
 const app = express();
 const server = http.createServer(app);
+
+const allowedOrigin = "http://localhost:5173";
+
 const io = socketIo(server, {
   cors: {
-    origin: "*",
+    origin: allowedOrigin,
     methods: ["GET", "POST"],
-    credentials: true
   },
-  allowEIO3: true,
-  transports: ['websocket', 'polling']
+  transports: ['websocket', 'polling'],
 });
 
 app.use(cors({
-  origin: "*",
+  origin: allowedOrigin,
   credentials: true
 }));
+
 app.use(express.json());
 
 const PORT = process.env.PORT || 3001;
+
 
 // Game state storage
 const rooms = new Map();
@@ -132,6 +135,7 @@ function createRoom(hostSocketId, hostNickname) {
       gameResult: null,
       currentVotingTarget: null,
       phaseTimer: null,
+      playersAcknowledgedRole: new Set(), // FIX: New state to track who has seen their role
       phaseTimeRemaining: 0
     },
     timers: {}
@@ -191,39 +195,67 @@ function startGame(roomCode) {
 }
 
 function processNightActions(room) {
-  const actions = room.gameState.nightActions;
-  let killedPlayer = null;
-  let savedPlayer = null;
-  
+  const actions = room.gameState.nightActions || {};
+  let killedPlayerId = null;
+  let savedPlayerId = null;
+
+  // Helper to resolve either an ID or a nickname into a real player ID
+  const resolveTargetId = (target) => {
+    if (!target) return null;
+
+    // Direct ID match
+    if (room.players.has(target)) {
+      return target;
+    }
+
+    // Nickname match (case insensitive just in case)
+    const found = [...room.players.entries()].find(
+      ([id, player]) => player.nickname.toLowerCase() === target.toLowerCase()
+    );
+    return found ? found[0] : null;
+  };
+
   // Process Mafia kill
   if (actions.mafia && actions.mafia.target) {
-    killedPlayer = actions.mafia.target;
+    killedPlayerId = resolveTargetId(actions.mafia.target);
   }
-  
+
   // Process Doctor save
   if (actions.doctor && actions.doctor.target) {
-    savedPlayer = actions.doctor.target;
+    savedPlayerId = resolveTargetId(actions.doctor.target);
   }
-  
-  // If doctor saved the killed player, no one dies
-  if (killedPlayer && savedPlayer && killedPlayer === savedPlayer) {
-    killedPlayer = null;
+
+  // If doctor saved the mafia target, no one dies
+  if (killedPlayerId && savedPlayerId && killedPlayerId === savedPlayerId) {
+    killedPlayerId = null;
   }
-  
+
   // Eliminate killed player
-  if (killedPlayer) {
-    const player = room.players.get(killedPlayer);
-    if (player) {
+  if (killedPlayerId) {
+    const player = room.players.get(killedPlayerId);
+    if (player && player.isAlive) {
       player.isAlive = false;
-      room.gameState.eliminatedPlayers.add(killedPlayer);
+      room.gameState.eliminatedPlayers.add(killedPlayerId);
     }
   }
-  
+
   // Clear night actions
   room.gameState.nightActions = {};
-  
-  return { killedPlayer, savedPlayer };
+
+  // FIX: Check for game end immediately after a player is eliminated
+  if (killedPlayerId && checkGameEnd(room)) {
+    io.to(room.code).emit('game_over', {
+      result: room.gameState.gameResult,
+      players: Array.from(room.players.values())
+    });
+    return { killedPlayer: null, savedPlayer: null };
+  }
+  return {
+    killedPlayer: killedPlayerId ? room.players.get(killedPlayerId) : null,
+    savedPlayer: savedPlayerId ? room.players.get(savedPlayerId) : null
+  };
 }
+
 
 function checkGameEnd(room) {
   const alivePlayers = Array.from(room.players.values()).filter(p => p.isAlive);
@@ -247,37 +279,28 @@ function checkGameEnd(room) {
 
 // Socket.IO event handlers
 io.on('connection', (socket) => {
-  console.log('User connected:', socket.id);
   
   socket.on('create_room', (data) => {
-    console.log('Create room request received:', data);
     try {
       const { nickname } = data;
       const room = createRoom(socket.id, nickname);
-      console.log('Room created:', room.code);
-      
       socket.join(room.code);
       const response = {
         roomCode: room.code,
         players: Array.from(room.players.values())
       };
-      console.log('Sending room_created event:', response);
       socket.emit('room_created', response);
-      console.log('room_created event sent successfully');
     } catch (error) {
-      console.error('Error creating room:', error);
       socket.emit('join_error', { message: 'Failed to create room' });
     }
   });
   
   socket.on('join_room', (data) => {
-    console.log('Join room request received:', data);
     try {
       const { roomCode, nickname } = data;
       const room = joinRoom(roomCode, socket.id, nickname);
       
       if (!room) {
-        console.log('Room not found:', roomCode);
         socket.emit('join_error', { message: 'Room not found or full' });
         return;
       }
@@ -287,18 +310,60 @@ io.on('connection', (socket) => {
         roomCode: roomCode,
         players: Array.from(room.players.values())
       };
-      console.log('Sending room_joined event:', response);
       socket.emit('room_joined', response);
-      console.log('room_joined event sent successfully');
       
       // Notify other players
       socket.to(roomCode).emit('player_joined', {
         players: Array.from(room.players.values())
       });
     } catch (error) {
-      console.error('Error joining room:', error);
       socket.emit('join_error', { message: 'Failed to join room' });
     }
+  });
+
+
+  socket.on('lobby_chat', (data) => {
+    const playerInfo = players.get(socket.id);
+    if (!playerInfo) return;
+
+    const room = rooms.get(playerInfo.roomCode);
+    if (!room || room.phase !== PHASES.LOBBY) return;
+
+    const player = room.players.get(socket.id);
+    if (!player) return;
+
+    // Broadcast the message to all clients in the room
+    io.to(playerInfo.roomCode).emit('chat_message', {
+      sender: player.nickname,
+      message: data.message,
+      timestamp: Date.now(),
+      color: '#E0E0E0' // A neutral color for lobby chat
+    });
+  });
+
+  // *** NEW: Handler for private Mafia chat ***
+  socket.on('mafia_chat', (data) => {
+    const playerInfo = players.get(socket.id);
+    if (!playerInfo) return;
+    
+    const room = rooms.get(playerInfo.roomCode);
+    if (!room || room.phase !== PHASES.NIGHT) return;
+    
+    const sendingPlayer = room.players.get(socket.id);
+    if (!sendingPlayer || !sendingPlayer.isAlive || sendingPlayer.role !== ROLES.MAFIA) return;
+
+    // Find all alive mafia members
+    const mafiaMembers = Array.from(room.players.values()).filter(p => p.role === ROLES.MAFIA && p.isAlive);
+
+    // Broadcast the message to only the mafia members
+    mafiaMembers.forEach(mafia => {
+      io.to(mafia.socketId).emit('chat_message', {
+        sender: sendingPlayer.nickname,
+        message: data.message,
+        timestamp: Date.now(),
+        color: '#FF6B6B', // A distinct red color for mafia chat
+      });
+    });
   });
   
   socket.on('start_game', () => {
@@ -310,6 +375,7 @@ io.on('connection', (socket) => {
     
     if (startGame(playerInfo.roomCode)) {
       // Send role assignments privately
+      // FIX: Emitting role to all players. They will now go to the Role Reveal screen
       room.players.forEach((player, socketId) => {
         io.to(socketId).emit('role_assigned', {
           role: player.role,
@@ -317,7 +383,7 @@ io.on('connection', (socket) => {
         });
       });
       
-      // Broadcast game start
+      // Broadcast game started to all clients
       io.to(playerInfo.roomCode).emit('game_started', {
         phase: PHASES.NIGHT,
         players: Array.from(room.players.values()).map(p => ({
@@ -326,7 +392,30 @@ io.on('connection', (socket) => {
           isAlive: p.isAlive
         }))
       });
-      
+    }
+  });
+
+  // FIX: New event to handle role acknowledgment from the client
+  socket.on('role_acknowledged', (data) => {
+    const playerInfo = players.get(socket.id);
+    if (!playerInfo) return;
+
+    const room = rooms.get(playerInfo.roomCode);
+    if (!room) return;
+
+    // Add player to the set of acknowledged players
+    room.gameState.playersAcknowledgedRole.add(socket.id);
+
+    // If all players have acknowledged their role, start the night phase
+    if (room.gameState.playersAcknowledgedRole.size === room.players.size) {
+      room.gameState.playersAcknowledgedRole.clear(); // Reset for next round
+      room.phase = PHASES.NIGHT;
+      room.gameState.currentPhase = PHASES.NIGHT;
+
+      io.to(room.code).emit('start_night_phase', {
+        phase: PHASES.NIGHT
+      });
+
       // Start night phase timer (30 seconds)
       startPhaseTimer(room, 30, () => {
         processNightPhase(room);
@@ -337,30 +426,60 @@ io.on('connection', (socket) => {
   socket.on('night_action', (data) => {
     const playerInfo = players.get(socket.id);
     if (!playerInfo) return;
-    
+
     const room = rooms.get(playerInfo.roomCode);
     if (!room || room.phase !== PHASES.NIGHT) return;
-    
+
     const player = room.players.get(socket.id);
     if (!player || !player.isAlive) return;
-    
+
     const { action, target } = data;
-    
-    if (player.role === ROLES.MAFIA && action === 'kill') {
-      room.gameState.nightActions.mafia = { target, actor: socket.id };
-    } else if (player.role === ROLES.DOCTOR && action === 'save') {
-      room.gameState.nightActions.doctor = { target, actor: socket.id };
-    } else if (player.role === ROLES.POLICE && action === 'investigate') {
-      const targetPlayer = room.players.get(target);
-      if (targetPlayer) {
-        socket.emit('investigation_result', {
-          target: target,
-          role: targetPlayer.role,
-          nickname: targetPlayer.nickname
-        });
+    // Helper to resolve target into a valid player ID
+    const resolveTargetId = (t) => {
+      if (!t) return null;
+
+      // If already a valid ID
+      if (room.players.has(t)) {
+        return t;
       }
+
+      // If it's a nickname (case-insensitive)
+      const found = [...room.players.entries()].find(
+        ([id, p]) => p.nickname.toLowerCase() === t.toLowerCase()
+      );
+      return found ? found[0] : null;
+    };
+
+    const targetId = resolveTargetId(target);
+    if (!targetId) {
+      return;
+    }
+
+    const targetPlayer = room.players.get(targetId);
+    if (!targetPlayer || !targetPlayer.isAlive) {
+      return;
+    }
+
+    // Register actions with player IDs (not nicknames)
+    if (player.role === ROLES.MAFIA && action === 'kill') {
+      room.gameState.nightActions.mafia = { target: targetId, actor: socket.id };
+      socket.emit('action_confirmed', { action: 'kill', target: targetPlayer.nickname });
+
+    } else if (player.role === ROLES.DOCTOR && action === 'save') {
+      room.gameState.nightActions.doctor = { target: targetId, actor: socket.id };
+      socket.emit('action_confirmed', { action: 'save', target: targetPlayer.nickname });
+
+    } else if (player.role === ROLES.POLICE && action === 'investigate') {
+      socket.emit('investigation_result', {
+        target: targetId,
+        role: targetPlayer.role,
+        nickname: targetPlayer.nickname,
+        isMafia: targetPlayer.role === ROLES.MAFIA
+      });
+
     }
   });
+
   
   socket.on('day_chat', (data) => {
     const playerInfo = players.get(socket.id);
@@ -373,7 +492,7 @@ io.on('connection', (socket) => {
     if (!player || !player.isAlive) return;
     
     io.to(playerInfo.roomCode).emit('chat_message', {
-      from: player.nickname,
+      sender: player.nickname,
       message: data.message,
       timestamp: Date.now()
     });
@@ -406,6 +525,9 @@ io.on('connection', (socket) => {
       return;
     }
     
+    // *** FIX: Clear the day phase timer before starting the voting timer ***
+    clearPhaseTimer(room);
+
     // Record the accusation
     room.gameState.accusations[socket.id] = {
       accuser: socket.id,
@@ -459,8 +581,6 @@ io.on('connection', (socket) => {
   });
   
   socket.on('disconnect', () => {
-    console.log('User disconnected:', socket.id);
-    
     const playerInfo = players.get(socket.id);
     if (playerInfo) {
       const room = rooms.get(playerInfo.roomCode);
@@ -493,7 +613,7 @@ io.on('connection', (socket) => {
 function processNightPhase(room) {
   const nightResult = processNightActions(room);
   
-  // Check for game end
+  // Check for game end immediately after a player is eliminated from night actions.
   if (checkGameEnd(room)) {
     io.to(room.code).emit('game_over', {
       result: room.gameState.gameResult,
@@ -581,14 +701,13 @@ function processVoting(room) {
     totalVotes: guiltyVotes + innocentVotes
   });
   
-  // Check for game end
+  // FIX: Check for game end immediately after a player is eliminated from voting
   if (checkGameEnd(room)) {
     io.to(room.code).emit('game_over', {
       result: room.gameState.gameResult,
-      eliminated: eliminated,
       players: Array.from(room.players.values())
     });
-    return;
+    return; // Return to prevent moving to the next phase
   }
   
   // Move to next night phase
@@ -628,4 +747,3 @@ app.get('/health', (req, res) => {
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
 });
-

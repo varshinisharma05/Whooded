@@ -1,5 +1,4 @@
-// Timer utility functions
-function startPhaseTimer(room, duration, onComplete) {
+function startPhaseTimer(room, duration, onComplete, io) {
   // Clear existing timer
   if (room.gameState.phaseTimer) {
     clearInterval(room.gameState.phaseTimer);
@@ -8,7 +7,7 @@ function startPhaseTimer(room, duration, onComplete) {
   room.gameState.phaseTimeRemaining = duration;
   
   // Broadcast initial timer
-  io.to(room.code).emit('timer_update', {
+  io.to(room.code).emit("timer_update", {
     timeRemaining: room.gameState.phaseTimeRemaining,
     phase: room.phase
   });
@@ -17,7 +16,7 @@ function startPhaseTimer(room, duration, onComplete) {
     room.gameState.phaseTimeRemaining--;
     
     // Broadcast timer update
-    io.to(room.code).emit('timer_update', {
+    io.to(room.code).emit("timer_update", {
       timeRemaining: room.gameState.phaseTimeRemaining,
       phase: room.phase
     });
@@ -38,4 +37,7 @@ function clearPhaseTimer(room) {
   room.gameState.phaseTimeRemaining = 0;
 }
 
-
+module.exports = {
+  startPhaseTimer,
+  clearPhaseTimer
+};
